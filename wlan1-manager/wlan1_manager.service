@@ -1,0 +1,15 @@
+[Unit]
+Description=GPS-based wlan1 Power Manager
+After=network.target
+
+[Service]
+ExecStart=/home/mike/network/wlan1-manager/venv/bin/python /home/mike/network/wlan1-manager/wlan1_manager.py
+WorkingDirectory=/home/mike/network/wlan1-manager/
+Restart=always
+RestartSec=5
+User=mike
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

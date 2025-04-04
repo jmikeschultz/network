@@ -1,0 +1,13 @@
+[Unit]
+Description=Run setup_access_point.sh at boot (one-time)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /home/mike/network/access-point/setup_ap.sh
+RemainAfterExit=yes
+User=root
+
+[Install]
+WantedBy=multi-user.target
