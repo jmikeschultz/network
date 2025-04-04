@@ -13,7 +13,8 @@ GPIO.setmode(GPIO.BCM)
 GPIO.setup(PIN, GPIO.OUT)
 
 GPS_PATH = "/home/mike/.cache/boat/current_position.json"
-CONFIG_PATH = "/home/mike/networking/wlan1-manager/wlan1_manager.yaml"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(SCRIPT_DIR, "wlan1_manager.yaml")
 
 # === LOGGING ===
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
