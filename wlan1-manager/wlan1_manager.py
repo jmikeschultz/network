@@ -6,6 +6,8 @@ import logging
 import yaml
 import RPi.GPIO as GPIO
 from geopy.distance import geodesic
+import subprocess
+import re
 
 # === CONFIG ===
 PIN = 16
@@ -21,6 +23,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 log = logging.getLogger("wlan1")
 
 # === HELPERS ===
+def get_wlan1_ssid():
+    try:
+        output = subprocess.check_output(["iw", "dev", "wlan1", "link"], text=True)
+        match = re.search(r"SSID:\s*(.+)", output)
+        if match:
+            return match.group(1).strip()
+        return None
+    except subprocess.CalledProcessError:
+        return None
+
 def load_config():
     try:
         with open(CONFIG_PATH, "r") as f:
@@ -56,11 +68,11 @@ def close_enough(current, target, max_miles):
 
 def power_on():
     GPIO.output(PIN, GPIO.HIGH)
-    log.info("USB power ON")
+    log.info("wlan1 power ON")
 
 def power_off():
     GPIO.output(PIN, GPIO.LOW)
-    log.info("USB power OFF")
+    log.info("wlan1 power OFF")
 
 # === MAIN LOOP ===
 def run():
@@ -70,7 +82,7 @@ def run():
 
     check_interval_secs = config.get("check_interval_secs", 3600)
     log.info(f"check_interval_secs:{check_interval_secs}")
-    time.sleep(check_interval_secs)
+    time.sleep(120) # stay on 2 minutes first time
 
     while True:
         config = load_config()
@@ -82,15 +94,22 @@ def run():
             continue
 
         if not config.get("enable"):
-            log.info("Manager disabled, keeping USB power ON")
+            log.info("Manager disabled, keeping wlan1 power on")
             power_on()
         else:
             hotspot = near_hotspot(gps, config)
             if hotspot:
-                log.info(f"Boat is near:{hotspot}")
-                power_on()
+                connected_ssid = get_wlan1_ssid()
+                if connected_ssid:
+                    log.info(f'wlan1 is connected to:{connected_ssid}')
+                else:
+                    log.info(f"Boat is near:{hotspot}, turning on wlan1 power")
+                    power_off() # power cycle
+                    time.sleep(10)
+                    power_on()
+                    time.sleep(30) # give extra time to connect
             else:
-                log.info("Boat is away")
+                log.info("Boat is away from hotspots, turning off wlan1 power")
                 power_off()
 
         time.sleep(check_interval_secs)                            
