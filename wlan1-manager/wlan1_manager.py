@@ -1,18 +1,17 @@
-# simplified_wlan1_manager.py
 import os
 import time
 import json
 import logging
 import yaml
 import RPi.GPIO as GPIO
-from geopy.distance import geodesic
 import subprocess
 import re
+from geopy.distance import geodesic
 
-# === CONFIG ===
+# === CONFIGURATION ===
 PIN = 16
 GPIO.setmode(GPIO.BCM)
-GPIO.setup(PIN, GPIO.OUT)
+GPIO.setup(PIN, GPIO.OUT, initial=GPIO.LOW)
 
 GPS_PATH = "/home/mike/.cache/boat/current_position.json"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -22,43 +21,24 @@ CONFIG_PATH = os.path.join(SCRIPT_DIR, "wlan1_manager.yaml")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 log = logging.getLogger("wlan1")
 
-# === HELPERS ===
-def get_wlan1_ssid():
-    try:
-        output = subprocess.check_output(["iw", "dev", "wlan1", "link"], text=True)
-        match = re.search(r"SSID:\s*(.+)", output)
-        if match:
-            return match.group(1).strip()
-        return None
-    except subprocess.CalledProcessError:
-        return None
+# === UTILITIES ===
 
 def load_config():
     try:
         with open(CONFIG_PATH, "r") as f:
-            config = yaml.safe_load(f)
-            return config or {}
+            return yaml.safe_load(f) or {}
     except Exception as e:
-        log.error(f"Failed to load config from {CONFIG_PATH}: {e}")
+        log.error(f"Failed to load config: {e}")
         return {}
 
 def get_gps():
     try:
         with open(GPS_PATH) as f:
-            data = json.load(f)
-            return (data["lat"], data["lon"])
+            pos = json.load(f)
+            return (pos["lat"], pos["lon"])
     except Exception as e:
         log.warning(f"No GPS: {e}")
         return None
-
-def near_hotspot(gps, config):
-    max_miles = config.get("max_miles", 1.0)    
-    for spot in config.get('hotspots', []):
-        name = spot.get('name')
-        ref = (spot.get("lat", 0), spot.get("lon", 0))
-        if close_enough(gps, ref, max_miles):
-            return name
-    return None
 
 def close_enough(current, target, max_miles):
     try:
@@ -66,53 +46,101 @@ def close_enough(current, target, max_miles):
     except:
         return False
 
-def power_on():
-    GPIO.output(PIN, GPIO.HIGH)
-    log.info("wlan1 power ON")
+def near_hotspot(gps, hotspots, max_miles):
+    for spot in hotspots:
+        ref = (spot.get("lat", 0), spot.get("lon", 0))
+        if close_enough(gps, ref, max_miles):
+            return spot.get("name")
+    return None
 
-def power_off():
-    GPIO.output(PIN, GPIO.LOW)
-    log.info("wlan1 power OFF")
+def get_wlan1_ssid():
+    try:
+        out = subprocess.check_output(["iw", "dev", "wlan1", "link"], text=True)
+        match = re.search(r"SSID:\s*(.+)", out)
+        return match.group(1).strip() if match else None
+    except subprocess.CalledProcessError:
+        return None
+
+def has_upstream(iface="wlan1", target="8.8.8.8"):
+    try:
+        return subprocess.run(
+            ["ping", "-I", iface, "-c", "2", "-W", "2", target],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        ).returncode == 0
+    except:
+        return False
+
+def bounce_interface():
+    log.info("Bouncing wlan1")
+    subprocess.call(["ip", "link", "set", "wlan1", "down"])
+    time.sleep(3)
+    subprocess.call(["ip", "link", "set", "wlan1", "up"])
+    time.sleep(15)
+
+def power_on(cfg):
+    if cfg.get("power_switch_present", True):
+        GPIO.output(PIN, GPIO.HIGH)
+        log.info("wlan1 power ON")
+    else:
+        log.info("wlan1 power ON (noop)")
+
+def power_off(cfg):
+    if cfg.get("power_switch_present", True):
+        GPIO.output(PIN, GPIO.LOW)
+        log.info("wlan1 power OFF")
+    else:
+        log.info("wlan1 power OFF (noop)")
 
 # === MAIN LOOP ===
+
 def run():
     log.info("Starting wlan1 manager")
-    config = load_config()
-    power_on()  # Always on at boot
-
-    check_interval_secs = config.get("check_interval_secs", 3600)
-    log.info(f"check_interval_secs:{check_interval_secs}")
-    time.sleep(120) # stay on 2 minutes first time
+    time.sleep(2)  # initial grace period
 
     while True:
-        config = load_config()
+        cfg = load_config()
         gps = get_gps()
+        gps_mode = cfg.get("gps_position_control", False)
+        check_secs = cfg.get("check_interval_secs", 3600)
+        max_miles = cfg.get("max_miles", 1.0)
+        hotspots = cfg.get("hotspots", [])
 
-        if not gps:
-            log.info("Missing GPS, keeping current state")
-            time.sleep(check_interval_secs) 
+        # === POWER CONTROL ===
+        if gps_mode and gps:
+            hotspot = near_hotspot(gps, hotspots, max_miles)
+            if hotspot:
+                log.info(f"GPS near hotspot '{hotspot}' — powering ON")
+                power_on(cfg)
+            else:
+                log.info("Not near any hotspot — powering OFF")
+                power_off(cfg)
+        else:
+            log.info("GPS-based control disabled or no GPS — powering ON")
+            power_on(cfg)
+
+        # === WIFI + UPSTREAM WATCHDOG ===
+        ssid = get_wlan1_ssid()
+        upstream = has_upstream() if ssid else False
+
+        if not ssid:
+            log.info("Not connected to any SSID")
+        elif not upstream:
+            log.info(f"Connected to '{ssid}' but no upstream")
+        else:
+            log.info(f"Connected to '{ssid}', upstream OK")
+            time.sleep(check_secs)
             continue
 
-        if not config.get("enable"):
-            log.info("Manager disabled, keeping wlan1 power on")
-            power_on()
+        # Bounce and recheck
+        bounce_interface()
+        new_ssid = get_wlan1_ssid()
+        if new_ssid:
+            log.info(f"After bounce, connected to: {new_ssid}")
         else:
-            hotspot = near_hotspot(gps, config)
-            if hotspot:
-                connected_ssid = get_wlan1_ssid()
-                if connected_ssid:
-                    log.info(f'wlan1 is connected to:{connected_ssid}')
-                else:
-                    log.info(f"Boat is near:{hotspot}, turning on wlan1 power")
-                    power_off() # power cycle
-                    time.sleep(10)
-                    power_on()
-                    time.sleep(30) # give extra time to connect
-            else:
-                log.info("Boat is away from hotspots, turning off wlan1 power")
-                power_off()
+            log.warning("After bounce, still not connected")
 
-        time.sleep(check_interval_secs)                            
+        time.sleep(check_secs)
 
 if __name__ == "__main__":
     run()
